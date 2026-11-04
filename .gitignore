@@ -1,0 +1,23 @@
+# Test results and documents stay out of this repo
+/results/
+/doc/
+run[0-9]*/
+log.txt
+*.log
+capture_settings.ini
+GUI_DAQ/output/
+
+# Firmware build outputs (tcl/build_full.tcl)
+/build/
+/vivado_proj/
+/ip_minidaq/
+*.jou
+*.str
+.Xil/
+
+# AMD files generated during the build (tcl/temac_support_files.tcl)
+/rtl/minidaq/tri_mode_ethernet_mac/
+
+# Software environment
+.venv/
+__pycache__/

@@ -1,0 +1,31 @@
+.codex
+.venv/
+.idea/
+__pycache__/
+*.dat
+log.txt
+output
+# Local C++ extension build outputs
+cppfit/build/
+cppfit/.eggs/
+cppfit/*.egg-info/
+cppfit/*.so
+cppfit/*.pyd
+# Native capture build outputs
+native_capture/build/
+native_capture/*.o
+native_capture/*.so
+native_capture/*.pyd
+native_capture/minidaq_capture
+native_capture/ethernet_frame_io
+
+# Native decoder build outputs
+native_decoder/build/
+native_decoder/*.o
+native_decoder/*.egg-info/
+native_decoder/*.so
+native_decoder/*.pyd
+
+# Compiled modules for 64-bit Windows and Python 3.11 are shipped so no compiler is needed
+!cppfit/*.cp311-win_amd64.pyd
+!native_decoder/*.cp311-win_amd64.pyd

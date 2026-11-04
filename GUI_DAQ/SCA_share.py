@@ -1,0 +1,108 @@
+class SCA_share(object):
+    """docstring for ClassName"""
+    CR_CHANNEL  = 0x00
+    CTRL_W_CRB  = 0X02
+    CTRL_R_CRB  = 0X03
+    CTRL_W_CRD  = 0X06
+    CTRL_R_CRD  = 0X07
+    ENJTAG_DATA = 0x08000000
+    ENADC_DATA  = 0x10000000
+    ENDAC_DATA  = 0x40000000
+    ENGPIO_DATA = 0x04000000
+
+
+    ADC_CHANNEL = 0X14
+    ADC_GO      = 0X02    
+    ADC_W_MUX   = 0X50
+    ADC_R_MUX   = 0X51
+    ADC_W_CURR  = 0X60
+    ADC_R_CURR  = 0X61
+    ADC_GO_DATA = 0X00000001
+    CSM_1V2_SENSE = 1
+    CSM_2V5_SENSE = 1
+    SCA_INT_TEMP  = 31
+
+    JTAG_CHANNEL = 0x13
+    JTAG_W_CTRL  = 0x80
+    JTAG_R_CTRL  = 0x81
+    JTAG_W_FREQ  = 0x90
+    JTAG_R_FREQ  = 0x91
+    JTAG_W_TDO0  = 0x00
+    JTAG_R_TDI0  = 0x01
+    JTAG_W_TDO1  = 0x10
+    JTAG_R_TDI1  = 0x11
+    JTAG_W_TDO2  = 0x20
+    JTAG_R_TDI2  = 0x21
+    JTAG_W_TDO3  = 0x30
+    JTAG_R_TDI3  = 0x31
+    JTAG_W_TMS0  = 0x40
+    JTAG_R_TMS0  = 0x41
+    JTAG_W_TMS1  = 0x50
+    JTAG_R_TMS1  = 0x51
+    JTAG_W_TMS2  = 0x60
+    JTAG_R_TMS2  = 0x61
+    JTAG_W_TMS3  = 0x70
+    JTAG_R_TMS3  = 0x71
+    JTAG_ARESET  = 0xC0
+    JTAG_GO      = 0xA2
+    JTAG_GO_M    = 0xB0
+
+    GPIO_CHANNEL     = 0x02
+    GPIO_W_DATAOUT   = 0x10
+    GPIO_R_DATAOUT   = 0x11
+    GPIO_R_DATAIN    = 0x01
+    GPIO_W_DIRECTION = 0x20
+    GPIO_R_DIRECTION = 0x21
+    GPIO_W_DATAOUT   = 0x10
+    GPIO_W_DATAOUT   = 0x10
+    GPIO_W_DATAOUT   = 0x10
+
+    GPIO_JTAGDAISY_V_0 = 10
+    GPIO_JTAGDAISY_V_1 = 14
+    GPIO_JTAGDAISY_V_2 = 1
+    GPIO_JTAGDAISY_V_3 = 13
+    GPIO_JTAGDAISY_V_4 = 17
+    GPIO_JTAGDAISY_V_5 = 6
+    GPIO_JTAGDAISY_V_6 = 26
+    GPIO_JTAGDAISY_V_7 = 20
+    GPIO_JTAGDAISY_V_8 = 12
+    GPIO_JTAGDAISY_V_9 = 19
+    GPIO_JTAGDAISY_V_10 = 23
+    GPIO_JTAGDAISY_V_11 = 15
+    GPIO_JTAGDAISY_V_12 = 27
+    GPIO_JTAGDAISY_V_13 = 24
+    GPIO_JTAGDAISY_V_14 = 21
+    GPIO_JTAGDAISY_V_15 = 18
+    GPIO_JTAGDAISY_V_16 = 28
+    GPIO_JTAGDAISY_V_17 = 16
+    GPIO_JTAGDAISY_V_18 = 25
+    GPIO_JTAGDAISY_V_19 = 22
+    GPIO_JTAG_RESET = 29
+
+
+
+    TDC_IR_LEN   = 5
+    TDC_IDCODE   = 0x11
+    TDC_BYPASS   = 0x0F
+    TDC_SETUP0   = 0x12
+    TDC_SETUP1   = 0x03
+    TDC_SETUP2   = 0x14
+    TDC_CONTROL0 = 0x05
+    TDC_CONTROL1 = 0x06
+    TDC_STATUS0  = 0x17
+    TDC_STATUS1  = 0x18
+
+
+    ASD_WRITE    = 0x09
+    ASD_READ     = 0x0A
+
+    FPGA_IR_LEN  = 6
+    FPGA_IDCODE    = 0b001001
+    FPGA_JPROGRAM  = 0b001011
+    FPGA_CFG_IN    = 0b000101
+    FPGA_JSTART    = 0b001100
+    
+    
+    
+    def __init__(self):
+        pass

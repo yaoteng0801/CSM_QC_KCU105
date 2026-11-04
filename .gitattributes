@@ -1,0 +1,4 @@
+*.sh text eol=lf
+*.bit binary
+*.ltx binary
+*.pyd binary
