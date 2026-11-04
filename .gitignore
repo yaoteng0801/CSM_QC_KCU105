@@ -21,3 +21,8 @@ GUI_DAQ/output/
 # Software environment
 .venv/
 __pycache__/
+
+# Vivado scratch files written to the repo root during a build
+/clockInfo.txt
+/iter_*_CongestedCLBsAndNets.txt
+/tight_setup_hold_pins.txt
