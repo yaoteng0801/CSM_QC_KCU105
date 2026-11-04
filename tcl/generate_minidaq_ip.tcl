@@ -27,20 +27,31 @@ proc create_minidaq_ip {name vlnv} {
 # at a time so the offending parameter is named, and count it as an error.  Parameters that already
 # hold the requested value are skipped, so re-running on an existing IP touches nothing (no
 # re-customization, no output-product invalidation).
+#
+# Several passes, because a wizard can ignore a parameter that only becomes active once another one
+# has been applied (blk_mem_gen ignores Port B settings until Memory_Type is dual port).  With one
+# pass, a brand-new tdc_hit_ram keeps its ENB pin and the design fails in opt_design.
 proc apply_ip_config {ip cfg} {
     global ip_cfg_errors
-    set todo {}
-    foreach {k v} $cfg {
-        if {[string tolower [get_property $k $ip]] ne [string tolower $v]} { lappend todo $k $v }
-    }
-    if {[llength $todo] == 0} { return }
-    if {[catch {set_property -dict $todo $ip} err]} {
-        puts "WARNING: atomic apply failed for [get_property NAME $ip] ($err); retrying per-parameter"
-        foreach {k v} $todo {
-            if {[catch {set_property $k $v $ip} e]} {
-                puts "ERROR: [get_property NAME $ip]: $k = $v rejected: $e"
-                incr ip_cfg_errors
+    for {set pass 1} {$pass <= 3} {incr pass} {
+        set todo {}
+        foreach {k v} $cfg {
+            if {[string tolower [get_property $k $ip]] ne [string tolower $v]} { lappend todo $k $v }
+        }
+        if {[llength $todo] == 0} { return }
+        if {[catch {set_property -dict $todo $ip} err]} {
+            puts "WARNING: atomic apply failed for [get_property NAME $ip] ($err); retrying per-parameter"
+            foreach {k v} $todo {
+                if {[catch {set_property $k $v $ip} e]} {
+                    puts "ERROR: [get_property NAME $ip]: $k = $v rejected: $e"
+                    incr ip_cfg_errors
+                }
             }
+        }
+    }
+    foreach {k v} $cfg {
+        if {[string tolower [get_property $k $ip]] ne [string tolower $v]} {
+            puts "INFO: [get_property NAME $ip]: $k is [get_property $k $ip], requested $v"
         }
     }
 }
