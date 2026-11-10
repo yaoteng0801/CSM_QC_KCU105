@@ -56,6 +56,7 @@ IDCODE_TIMEOUT_S = 60.0
 PROGRAM_TIMEOUT_S = 30.0
 PRBS_LOCK_TIMEOUT_S = 10.0
 BER_POLL_S = 2.0
+ERROR_CLEARS = 3  # PRBS and D-line errors are cleared and measured again this often before failing
 DLINE_STALL_S = 30.0
 MEZZ_RETRIES = 10
 MONITOR_INTERVAL_S = 5.0
@@ -87,6 +88,10 @@ class QcFailure(Exception):
 
 class QcStopped(Exception):
     """The operator pressed Stop QC."""
+
+
+class QcEnded(Exception):
+    """The operator chose to end the run in a question; no redo is offered."""
 
 
 @dataclass
@@ -316,16 +321,14 @@ class CsmQcRun:
                 for key, name in STEPS:
                     current = {"name": name, "result": "RUNNING", "detail": ""}
                     self.step_log.append(current)
-                    self.ui.step(key, "running")
-                    begun = self.clock()
-                    yield from getattr(self, f"_step_{key}")()
-                    current.update(result="PASS", seconds=round(self.clock() - begun, 1))
-                    self.ui.step(key, "pass")
+                    outcome = yield from self._run_step(key, name, current)
+                    current["result"] = "SKIPPED" if outcome == "skipped" else "PASS"
+                    self.ui.step(key, "skip" if outcome == "skipped" else "pass")
                 self.verdict = "PASS"
             except QcStopped:
                 self.verdict = "STOPPED"
                 self.failure = "Stopped by the operator."
-            except QcFailure as error:
+            except (QcFailure, QcEnded) as error:
                 self.verdict, self.failure = "FAIL", str(error)
             except Exception as error:
                 self.verdict, self.failure = "FAIL", f"{type(error).__name__}: {error}"
@@ -341,6 +344,33 @@ class CsmQcRun:
             sys.stdout = real_stdout
             self._tee.close()
         self.ui.finished(self.verdict, self.failure, self.folder)
+
+    def _run_step(self, key, name, current):
+        """Run one step.  After a failure the hardware is made safe and the operator may redo it."""
+        attempt = 0
+        while True:
+            attempt += 1
+            current["attempts"] = attempt
+            self.ui.step(key, "running")
+            begun = self.clock()
+            try:
+                outcome = yield from getattr(self, f"_step_{key}")()
+                current["seconds"] = round(self.clock() - begun, 1)
+                return outcome
+            except (QcStopped, QcEnded):
+                raise
+            except Exception as error:
+                reason = str(error) if isinstance(error, QcFailure) else f"{type(error).__name__}: {error}"
+            current.setdefault("failed_attempts", []).append(reason)
+            self.ui.step(key, "fail")
+            self._say(f"FAIL at {name}: {reason}")
+            if self.stop_requested:
+                raise QcStopped()
+            yield from self._safe_state()
+            if not self.ui.ask_redo(name, reason):
+                raise QcFailure(reason)
+            self.flags.append(f"{name} redone after: {reason}")
+            self._say(f"Redoing {name}.")
 
     def _safe_state(self):
         attempts = (self._stop_programming, self._stop_capture, self._stop_monitor,
@@ -509,37 +539,24 @@ class CsmQcRun:
             self.hw.set_prbs(SLAVE_ADDR, SLAVE_LINK, selection)
             yield from self._sleep(1.0)
 
-        # The checker only locks after a counter reset once the pattern is running.
         link_mask = (1 << MASTER_LINK) | (1 << SLAVE_LINK)
-        deadline = self.clock() + PRBS_LOCK_TIMEOUT_S
-        while True:
-            self.hw.reset_prbs_counters(link_mask)
-            yield from self._sleep(1.0)
-            locked, _counts = self.hw.read_prbs(uplinks)
-            if locked & link_mask == link_mask:
-                break
-            if self.clock() >= deadline:
-                raise QcFailure(f"PRBS-31 did not lock: locked = {locked:0{uplinks}b}.")
-
-        # A counter with no lock also reads zero, so lock must hold for the whole test.
-        self.hw.reset_prbs_counters(link_mask)
-        begun = self.clock()
-        limit = float("inf")
-        while limit > target:
-            yield from self._sleep(BER_POLL_S)
-            locked, counts = self.hw.read_prbs(uplinks)
-            elapsed = self.clock() - begun
-            if locked & link_mask != link_mask:
-                raise QcFailure(f"PRBS-31 lost lock after {elapsed:.0f} s: locked = {locked:0{uplinks}b}.")
-            errors = counts[MASTER_LINK] + counts[SLAVE_LINK]
-            if errors:
-                raise QcFailure(
-                    f"PRBS-31 errors after {elapsed:.0f} s: master {counts[MASTER_LINK]}, "
-                    f"slave {counts[SLAVE_LINK]}.")
-            limit = prbs_ber_limit(elapsed)
-            self.ui.status(f"PRBS: {elapsed:.0f} s, no errors, BER = {limit:.2e}, target {target:.2e}")
-        self.results["prbs"] = {"seconds": round(elapsed, 1), "ber_limit": limit,
-                                "target": target, "line_rate_bps": PRBS_LINE_RATE_BPS}
+        if target == 0:
+            # The pattern was switched as normal; the lock check and measurement are skipped.
+            self.results["prbs"] = {"skipped": True}
+            self.flags.append("PRBS measurement skipped (target BER 0); the pattern was switched as normal.")
+            self._say("PRBS target BER is 0: measurement skipped.")
+        else:
+            # The checker only locks after a counter reset once the pattern is running.
+            deadline = self.clock() + PRBS_LOCK_TIMEOUT_S
+            while True:
+                self.hw.reset_prbs_counters(link_mask)
+                yield from self._sleep(1.0)
+                locked, _counts = self.hw.read_prbs(uplinks)
+                if locked & link_mask == link_mask:
+                    break
+                if self.clock() >= deadline:
+                    raise QcFailure(f"PRBS-31 did not lock: locked = {locked:0{uplinks}b}.")
+            yield from self._measure_prbs(uplinks, link_mask, target)
 
         # IC and SCA need framed data again before anything else can run.
         yield from self._stop_prbs()
@@ -550,6 +567,44 @@ class CsmQcRun:
             self.tabs.lpgbt.fpga_physical_rx_reset()
             yield from self._sleep(1.0)
         yield from self._require_links()
+        return "skipped" if target == 0 else None
+
+    def _measure_prbs(self, uplinks, link_mask, target):
+        """Measure until the BER limit reaches the target.
+
+        Errors clear the counters and the BER is counted again from that moment; the link is not
+        reset.  Errors after ERROR_CLEARS clears fail the step.  A counter with no lock also reads
+        zero, so lock must hold for the whole test.
+        """
+        self.hw.reset_prbs_counters(link_mask)
+        first = begun = self.clock()
+        limit = float("inf")
+        clears = []
+        while limit > target:
+            yield from self._sleep(BER_POLL_S)
+            locked, counts = self.hw.read_prbs(uplinks)
+            elapsed = self.clock() - begun
+            if locked & link_mask != link_mask:
+                raise QcFailure(f"PRBS-31 lost lock after {elapsed:.0f} s: locked = {locked:0{uplinks}b}.")
+            if counts[MASTER_LINK] + counts[SLAVE_LINK]:
+                found = (f"PRBS-31 errors after {elapsed:.0f} s: master {counts[MASTER_LINK]}, "
+                         f"slave {counts[SLAVE_LINK]}")
+                if len(clears) >= ERROR_CLEARS:
+                    raise QcFailure(f"{found}, still after clearing the count {ERROR_CLEARS} times.")
+                clears.append(found)
+                self._say(f"{found}; clearing the count and measuring again "
+                          f"({len(clears)}/{ERROR_CLEARS}).")
+                self.hw.reset_prbs_counters(link_mask)
+                begun = self.clock()
+                limit = float("inf")
+                continue
+            limit = prbs_ber_limit(elapsed)
+            self.ui.status(f"PRBS: {elapsed:.0f} s, no errors, BER = {limit:.2e}, target {target:.2e}")
+        self.results["prbs"] = {"seconds": round(elapsed, 1), "total_seconds": round(self.clock() - first, 1),
+                                "ber_limit": limit, "target": target,
+                                "line_rate_bps": PRBS_LINE_RATE_BPS, "error_clears": clears}
+        if clears:
+            self.flags.append(f"PRBS error count cleared {len(clears)} time(s): " + "; ".join(clears))
 
     # ------------------------------------------------------------- steps 5 to 7
     def _selected_mezz(self):
@@ -585,7 +640,7 @@ class CsmQcRun:
                     "Mezzanines not detected",
                     f"Mezz scan did not detect: {', '.join(map(str, missing))}.\n\n"
                     "Continue the QC without them?"):
-                raise QcFailure(f"Operator ended the run: mezzanines not detected: {missing}.")
+                raise QcEnded(f"Operator ended the run: mezzanines not detected: {missing}.")
             self._accepted_missing = set(missing)
             if missing:
                 self.flags.append(f"Run without mezzanines not detected: {missing}")
@@ -618,7 +673,7 @@ class CsmQcRun:
     def _attempt_scan_and_program(self):
         try:
             return (yield from self._scan_and_program())
-        except (QcFailure, QcStopped):
+        except (QcFailure, QcStopped, QcEnded):
             raise
         except Exception as error:
             return [f"{type(error).__name__}: {error}"]
@@ -635,21 +690,44 @@ class CsmQcRun:
                         f"{', '.join(problems)}.")
 
     def _step_ber(self):
+        """Measure until the worst D-line's BER limit reaches the target.
+
+        The firmware counters only count up, so they are cleared in software: each measurement
+        starts from a reading.  Errors take a new reading and the BER is counted again from there,
+        without any reset; errors after ERROR_CLEARS clears fail the step.
+        """
         target = self.settings.dline_target
+        if target == 0:
+            self.results["dline_ber"] = {"skipped": True}
+            self.flags.append("BER monitor skipped (target BER 0).")
+            self._say("BER monitor target BER is 0: measurement skipped.")
+            return "skipped"
         tdcs = [WHICH_CSM * MEZZ_PER_CSM + mezz for mezz in self._selected_mezz()]
-        # Counted from here, whatever the counters held before this step.
         start = {tdc: self.hw.read_ber(tdc) for tdc in tdcs}
         progress = {(tdc, line): (0, self.clock()) for tdc in tdcs for line in (1, 0)}
         limit = float("inf")
+        clears = []
         while limit > target:
             yield from self._sleep(BER_POLL_S)
+            readings = {tdc: self.hw.read_ber(tdc) for tdc in tdcs}
+            errors = [f"TDC {tdc} dline1 {err1 - start[tdc][2]}, dline0 {err0 - start[tdc][3]}"
+                      for tdc, (_rec1, _rec0, err1, err0) in readings.items()
+                      if err1 - start[tdc][2] or err0 - start[tdc][3]]
+            if errors:
+                found = "D-line errors: " + "; ".join(errors)
+                if len(clears) >= ERROR_CLEARS:
+                    raise QcFailure(f"{found}, still after clearing the count {ERROR_CLEARS} times.")
+                clears.append(found)
+                self._say(f"{found}; clearing the count and measuring again "
+                          f"({len(clears)}/{ERROR_CLEARS}).")
+                start = readings
+                progress = {(tdc, line): (0, self.clock()) for tdc in tdcs for line in (1, 0)}
+                limit = float("inf")
+                continue
             fewest = None
             for tdc in tdcs:
-                rec1, rec0, err1, err0 = self.hw.read_ber(tdc)
+                rec1, rec0, _err1, _err0 = readings[tdc]
                 base = start[tdc]
-                if err1 - base[2] or err0 - base[3]:
-                    raise QcFailure(f"D-line errors on TDC {tdc}: dline1 {err1 - base[2]}, "
-                                    f"dline0 {err0 - base[3]}.")
                 for line, frames in ((1, rec1 - base[0]), (0, rec0 - base[1])):
                     seen, moved_at = progress[tdc, line]
                     if frames > seen:
@@ -659,7 +737,10 @@ class CsmQcRun:
                     fewest = frames if fewest is None else min(fewest, frames)
             limit = dline_ber_limit(fewest)
             self.ui.status(f"D-line BER: {fewest:.3e} frames, no errors, BER = {limit:.2e}, target {target:.2e}")
-        self.results["dline_ber"] = {"frames": fewest, "ber_limit": limit, "target": target}
+        self.results["dline_ber"] = {"frames": fewest, "ber_limit": limit, "target": target,
+                                     "error_clears": clears}
+        if clears:
+            self.flags.append(f"D-line error count cleared {len(clears)} time(s): " + "; ".join(clears))
 
     def _step_enable(self):
         mezz = self.tabs.mezz
@@ -877,9 +958,12 @@ class CsmQcRun:
         if self.failure:
             lines.append(f"Reason:        {self.failure}")
         lines += ["", "Steps:"]
-        lines += [f"  {step['result']:8} {step['name']}"
-                  + (f" ({step['seconds']} s)" if "seconds" in step else "")
-                  for step in self.step_log]
+        for step in self.step_log:
+            attempts = step.get("attempts", 1)
+            lines.append(f"  {step['result']:8} {step['name']}"
+                         + (f" ({step['seconds']} s)" if "seconds" in step else "")
+                         + (f", {attempts} attempts" if attempts > 1 else ""))
+            lines += [f"           failed attempt: {reason}" for reason in step.get("failed_attempts", [])]
         lines += ["", "Flagged, not failed:"] + [f"  {flag}" for flag in self.flags or ["none"]]
         lines += ["", "Results:"] + [f"  {key}: {value}" for key, value in self.results.items()]
         with open(os.path.join(self.folder, "qc_summary.txt"), "w", encoding="utf-8") as stream:

@@ -48,6 +48,10 @@ class Hardware:
         self.ber_error_at = None
         self.stalled_tdc = None
         self.prbs_started = None
+        self.prbs_reads = 0
+        self.ber_reads = 0
+        self.prbs_burst_times = []  # One error burst each; a counter reset clears it.
+        self.ber_burst_times = []   # Each adds 2 errors to TDC 5's cumulative dline1 count.
 
     def read_links(self):
         if self.links_after_prbs is not None and self.resets:
@@ -71,14 +75,20 @@ class Hardware:
         locked = 0b11 if running and self.resets >= self.lock_after_resets else 0
         if self.lock_lost_at is not None and self.clock() >= self.lock_lost_at:
             locked = 0b10
+        self.prbs_reads += 1
         errors = 7 if self.prbs_errors_at is not None and self.clock() >= self.prbs_errors_at else 0
+        if any(self.prbs_started < t <= self.clock() for t in self.prbs_burst_times):
+            errors = 5
         return locked, [errors, 0]
 
     def read_ber(self, tdc):
         frames = 1000 + int(self.frame_rate * self.clock())
         if tdc == self.stalled_tdc:
             return 1000, frames, 0, 0
+        self.ber_reads += 1
         errors = 3 if self.ber_error_at is not None and self.clock() >= self.ber_error_at else 0
+        if tdc == 5:
+            errors += 2 * sum(1 for t in self.ber_burst_times if t <= self.clock())
         return frames, frames, errors, 0
 
 
@@ -372,6 +382,8 @@ class Ui:
         self.questions = []
         self.answer = True
         self.result = None
+        self.redo_answers = []  # Answers to the step-failure pop-up; Stop QC once they run out.
+        self.redo_asked = []
 
     def status(self, text):
         pass
@@ -382,6 +394,10 @@ class Ui:
     def confirm(self, title, text):
         self.questions.append(text)
         return self.answer
+
+    def ask_redo(self, step, reason):
+        self.redo_asked.append((step, reason))
+        return self.redo_answers.pop(0) if self.redo_answers else False
 
     def finished(self, verdict, reason, folder):
         self.result = (verdict, reason, folder)
@@ -594,14 +610,58 @@ class PrbsTests(unittest.TestCase):
         sim.drive()
         self.assertLess(sim.summary()["results"]["prbs"]["seconds"], 10.0)
 
-    def test_first_error_fails(self):
+    def test_errors_that_keep_coming_fail_after_three_clears(self):
         sim = Sim(self)
         sim.hw.prbs_errors_at = 100.0
         verdict, reason, _folder = sim.drive()
         self.assertEqual(verdict, "FAIL")
         self.assertIn("master 7", reason)
+        self.assertIn("3 times", reason)
         self.assertNotIn("mezz_scan", sim.actions())
         self.assertEqual(sim.hw.pattern, {0: 0, 1: 0})
+        # Lock-up reset, measurement start, then one clear per error, never a link reset.
+        self.assertEqual(sim.actions().count("prbs_reset"), 2 + 3)
+        self.assertNotIn("rx_reset", sim.actions())
+        self.assertEqual(len(sim.ui.redo_asked), 1)
+
+    def test_an_error_burst_is_cleared_and_the_ber_counted_again(self):
+        sim = Sim(self)
+        sim.hw.prbs_burst_times = [300.0]
+        self.assertEqual(sim.drive()[0], "PASS")
+        result = sim.summary()["results"]["prbs"]
+        self.assertEqual(len(result["error_clears"]), 1)
+        self.assertIn("master 5", result["error_clears"][0])
+        # The BER is counted from the clear, so the test runs on for the full time after it.
+        self.assertGreaterEqual(result["seconds"], 781.25)
+        self.assertGreater(result["total_seconds"], result["seconds"] + 200)
+        self.assertTrue(any("PRBS error count cleared 1 time" in flag for flag in sim.summary()["flags"]))
+        self.assertEqual(sim.ui.redo_asked, [])
+
+    def test_three_bursts_still_pass(self):
+        sim = Sim(self)
+        sim.hw.prbs_burst_times = [100.0, 200.0, 300.0]
+        self.assertEqual(sim.drive()[0], "PASS")
+        self.assertEqual(len(sim.summary()["results"]["prbs"]["error_clears"]), 3)
+
+    def test_a_fourth_burst_fails(self):
+        sim = Sim(self)
+        sim.hw.prbs_burst_times = [100.0, 200.0, 300.0, 400.0]
+        verdict, reason, _folder = sim.drive()
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("3 times", reason)
+
+    def test_zero_target_switches_the_pattern_but_measures_nothing(self):
+        sim = Sim(self, prbs_target=0.0)
+        self.assertEqual(sim.drive()[0], "PASS")
+        calls = [e for e in sim.log if e[0] == "prbs"]
+        self.assertEqual(calls, [("prbs", 117, 0), ("prbs", 115, 0), ("prbs", 117, 4), ("prbs", 115, 4),
+                                 ("prbs", 117, 0), ("prbs", 115, 0)])
+        self.assertEqual(sim.hw.prbs_reads, 0)
+        self.assertIn(("prbs", "skip"), sim.ui.steps)
+        summary = sim.summary()
+        self.assertEqual(summary["results"]["prbs"], {"skipped": True})
+        step = next(s for s in summary["steps"] if s["name"].startswith("4."))
+        self.assertEqual(step["result"], "SKIPPED")
 
     def test_no_lock_never_passes_on_zero_errors(self):
         sim = Sim(self)
@@ -652,6 +712,7 @@ class MezzTests(unittest.TestCase):
         self.assertEqual(verdict, "FAIL")
         self.assertIn("[19]", reason)
         self.assertEqual(sim.mezz.scans, 1)
+        self.assertEqual(sim.ui.redo_asked, [])
 
     def test_all_detected_never_asks(self):
         sim = Sim(self)
@@ -738,20 +799,37 @@ class DlineBerTests(unittest.TestCase):
         self.assertLess(result["frames"], 2.5e9 + 8e6 * 2 * csm_qc.BER_POLL_S)
         self.assertLessEqual(result["ber_limit"], 1e-11)
 
-    def test_error_fails_and_names_the_tdc(self):
-        sim = Sim(self)
-        original = sim.hw.read_ber
-        reads = []
+    def ber_step_start(self, sim):
+        # The time the D-line step starts in a good run, so bursts can be placed inside it.
+        probe = Sim(self)
+        probe.drive()
+        return next(s for s in probe.summary()["steps"] if s["name"].startswith("5."))
 
-        def errors_on_tdc_5(tdc):
-            reads.append(tdc)
-            rec1, rec0, _err1, err0 = original(tdc)
-            return rec1, rec0, (1 if tdc == 5 and len(reads) > 40 else 0), err0
-        sim.hw.read_ber = errors_on_tdc_5
+    def test_an_error_burst_is_cleared_and_the_ber_counted_again(self):
+        sim = Sim(self)
+        sim.hw.ber_burst_times = [1000.0]
+        self.assertEqual(sim.drive()[0], "PASS")
+        result = sim.summary()["results"]["dline_ber"]
+        self.assertEqual(len(result["error_clears"]), 1)
+        self.assertIn("TDC 5 dline1 2", result["error_clears"][0])
+        self.assertGreaterEqual(result["frames"], 2.5e9)
+        self.assertNotIn("global_reset", sim.actions()[sim.actions().index("dline"):sim.actions().index("tdc_inputs", sim.actions().index("dline"))])
+
+    def test_errors_that_keep_coming_fail_after_three_clears_and_name_the_tdc(self):
+        sim = Sim(self)
+        sim.hw.ber_burst_times = [1000.0 + 4 * n for n in range(200)]
         verdict, reason, _folder = sim.drive()
         self.assertEqual(verdict, "FAIL")
         self.assertIn("TDC 5", reason)
+        self.assertIn("3 times", reason)
         self.assertNotIn("monitor_start", sim.actions())
+
+    def test_zero_target_skips_the_step(self):
+        sim = Sim(self, dline_target=0.0)
+        self.assertEqual(sim.drive()[0], "PASS")
+        self.assertEqual(sim.hw.ber_reads, 0)
+        self.assertIn(("ber", "skip"), sim.ui.steps)
+        self.assertEqual(sim.summary()["results"]["dline_ber"], {"skipped": True})
 
     def test_counts_older_than_the_step_are_ignored(self):
         sim = Sim(self)
@@ -913,6 +991,75 @@ class CaptureTests(unittest.TestCase):
         verdict, reason, _folder = sim.drive()
         self.assertEqual(verdict, "FAIL")
         self.assertIn("stopped by itself", reason)
+
+
+class RedoTests(unittest.TestCase):
+    def test_redo_runs_only_the_failed_step_again(self):
+        sim = Sim(self)
+        sim.hw.links = (0b01, 0b1)
+
+        def repair(run_sim):
+            if sim.ui.redo_asked:
+                sim.hw.links = (0b11, 0b1)
+        sim.on_tick = repair
+        sim.ui.redo_answers = [True]
+        self.assertEqual(sim.drive()[0], "PASS")
+        self.assertEqual(len(sim.ui.redo_asked), 1)
+        self.assertIn("00000001", sim.ui.redo_asked[0][1])
+        self.assertEqual([e for e in sim.log if e[0] == "load"], [("load", "master"), ("load", "slave")])
+        summary = sim.summary()
+        step = next(s for s in summary["steps"] if s["name"].startswith("3."))
+        self.assertEqual(step["attempts"], 2)
+        self.assertEqual(len(step["failed_attempts"]), 1)
+        self.assertTrue(any("redone after" in flag for flag in summary["flags"]))
+        text = (Path(sim.ui.result[2]) / "qc_summary.txt").read_text()
+        self.assertIn("2 attempts", text)
+        self.assertIn("failed attempt:", text)
+
+    def test_stop_qc_in_the_pop_up_ends_the_run(self):
+        sim = Sim(self)
+        sim.hw.links = (0b01, 0b1)
+        verdict, reason, _folder = sim.drive()
+        self.assertEqual(verdict, "FAIL")
+        self.assertEqual(len(sim.ui.redo_asked), 1)
+        self.assertNotIn("idcode", sim.actions())
+
+    def test_failing_again_asks_again(self):
+        sim = Sim(self)
+        sim.hw.links = (0b01, 0b1)
+        sim.ui.redo_answers = [True, True]
+        self.assertEqual(sim.drive()[0], "FAIL")
+        self.assertEqual(len(sim.ui.redo_asked), 3)
+
+    def test_capture_is_stopped_and_settings_restored_before_the_pop_up(self):
+        sim = Sim(self)
+        sim.capture.errors_at = 5.0
+        seen = []
+        original = sim.ui.ask_redo
+
+        def check(step, reason):
+            seen.append((sim.backend.running, sim.capture.folder, sim.capture._daq_preflight_callback))
+            sim.capture.errors_at = None
+            return original(step, reason)
+        sim.ui.ask_redo = check
+        sim.ui.redo_answers = [True]
+        self.assertEqual(sim.drive()[0], "PASS")
+        self.assertEqual(seen, [(False, "last-operator-folder", "preflight")])
+        self.assertEqual(sim.actions().count("capture_start"), 2)
+        self.assertEqual(sim.capture.folder, "last-operator-folder")
+
+    def test_prbs_redo_starts_from_framed_links(self):
+        sim = Sim(self)
+        sim.hw.lock_after_resets = 10**6
+        def allow_lock(run_sim):
+            if sim.ui.redo_asked:
+                sim.hw.lock_after_resets = 0
+        sim.on_tick = allow_lock
+        sim.ui.redo_answers = [True]
+        self.assertEqual(sim.drive()[0], "PASS")
+        calls = [e[2] for e in sim.log if e[0] == "prbs"]
+        # Fail: none, PRBS-31, safe state none; redo: none, PRBS-31, none.
+        self.assertEqual(calls, [0, 0, 4, 4, 0, 0, 0, 0, 4, 4, 0, 0])
 
 
 class StopTests(unittest.TestCase):
@@ -1146,13 +1293,34 @@ class PageTests(unittest.TestCase):
                                       ("edit_bitstream", "missing.bit", "not found"),
                                       ("edit_output", "", "output"),
                                       ("edit_prbs_target", "abc", "PRBS"),
-                                      ("edit_prbs_target", "0", "PRBS"),
+                                      ("edit_prbs_target", "-1", "PRBS"),
                                       ("edit_dline_target", "1.5", "BER monitor")):
             page = self.page()
             getattr(page, widget).setText(value)
             settings, problem = page.read_inputs()
             self.assertIsNone(settings)
             self.assertIn(expect, problem)
+
+    def test_zero_targets_are_accepted_as_skip(self):
+        page = self.page()
+        page.edit_prbs_target.setText("0")
+        page.edit_dline_target.setText("0")
+        settings, problem = page.read_inputs()
+        self.assertIsNone(problem)
+        self.assertEqual((settings.prbs_target, settings.dline_target), (0.0, 0.0))
+
+    def test_redo_pop_up_buttons(self):
+        page = self.page()
+        for button, expected in (("Redo this step", True), ("Stop QC", False)):
+            shown = []
+
+            def press(box, text=button):
+                shown.append(box.text())
+                next(b for b in box.buttons() if b.text() == text).click()
+                return 0
+            with patch.object(QtWidgets.QMessageBox, "exec_", press):
+                self.assertIs(page.ask_redo("3. Check link status", "links are not ready"), expected)
+            self.assertIn("links are not ready", shown[0])
 
     def test_needs_an_ethernet_interface(self):
         settings, problem = self.page(device="").read_inputs()

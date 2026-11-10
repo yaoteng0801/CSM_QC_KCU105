@@ -72,7 +72,10 @@ programming starts), `Worker_Monitor.py` and `tab_monitor.py` (`scan_limit`) and
 `MainWindow.py` (the tab and `show_adc_plots`). Keep these when merging upstream.
 Results go to `<output>/<serial>/<operator>/YYYYMMDDHHMM/`: `qc_summary.txt`,
 `qc_summary.json`, `qc_log.txt`, the monitoring CSV and plot, `plots/ADC_overall/`
-and the capture's run folder. `PRBS_LINE_RATE_BPS` in `csm_qc.py` is 12.8e9 as the
+and the capture's run folder. A failed step offers **Redo this step** (after
+making the hardware safe) or **Stop QC**. A target BER of 0 skips that
+measurement; the configuration still runs. PRBS or D-line errors clear the
+count and the measurement starts again, up to 3 times, before the step fails. `PRBS_LINE_RATE_BPS` in `csm_qc.py` is 12.8e9 as the
 QC procedure specifies; the transceivers themselves run at 10.24 Gb/s.
 
 Tested on Windows 11, Python 3.11, Npcap 1.90 (2026-10-28): all upstream unit

@@ -11,6 +11,7 @@ _STATE_STYLE = {
     "waiting": "color: gray;",
     "running": "background-color: #fff3b0; font-weight: bold;",
     "pass": "background-color: #b7e4b0;",
+    "skip": "background-color: #d6e4f0; font-style: italic;",
     "fail": "background-color: #f4a6a0; font-weight: bold;",
 }
 
@@ -72,6 +73,8 @@ class tab_qc(QtWidgets.QWidget):
         target_grid = QtWidgets.QGridLayout(targets)
         self.edit_prbs_target = QtWidgets.QLineEdit("1E-13")
         self.edit_dline_target = QtWidgets.QLineEdit("1E-11")
+        for edit in (self.edit_prbs_target, self.edit_dline_target):
+            edit.setToolTip("0 skips the measurement; the configuration still runs as normal.")
         self.spin_threshold = QtWidgets.QSpinBox()
         self.spin_threshold.setRange(0, 255)
         self.spin_threshold.setValue(114)
@@ -171,9 +174,9 @@ class tab_qc(QtWidgets.QWidget):
             try:
                 value = float(edit.text())
             except ValueError:
-                value = 0.0
-            if not 0.0 < value < 1.0:
-                return None, f"{name} target BER must be a number such as 1E-13."
+                value = -1.0  # Not 0: that would mean "skip".
+            if not 0.0 <= value < 1.0:
+                return None, f"{name} target BER must be a number such as 1E-13, or 0 to skip it."
             targets.append(value)
         device = self.tabs.lpgbt.current_ethernet_device()
         if not device or "ERROR" in device:
@@ -233,6 +236,17 @@ class tab_qc(QtWidgets.QWidget):
             self, title, text,
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         return answer == QtWidgets.QMessageBox.Yes
+
+    def ask_redo(self, step, reason):
+        dialog = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Critical, "CSM QC step failed",
+            f"{step} failed.\n\n{reason}\n\nRedo this step, or stop the QC run?", parent=self)
+        redo = dialog.addButton("Redo this step", QtWidgets.QMessageBox.AcceptRole)
+        stop = dialog.addButton("Stop QC", QtWidgets.QMessageBox.RejectRole)
+        dialog.setDefaultButton(redo)
+        dialog.setEscapeButton(stop)
+        dialog.exec_()
+        return dialog.clickedButton() is redo
 
     def finished(self, verdict, reason, folder):
         self.button_start.setEnabled(True)
